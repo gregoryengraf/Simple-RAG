@@ -1,0 +1,14 @@
+Flask
+Werkzeug
+aioflask
+langchain-community
+langchain
+langchain-openai
+langchain-postgres
+openai
+psycopg2-binary
+requests
+SQLAlchemy
+python-dotenv
+pgvector
+streamlit

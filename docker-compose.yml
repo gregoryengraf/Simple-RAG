@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5001:5001"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - db
+    volumes:
+      - .:/app
+    networks:
+      app-network:
+        ipv4_address: 172.20.0.2
+
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile-postgres
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=vectordb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      app-network:
+        ipv4_address: 172.20.0.3
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile-streamlit
+    ports:
+      - "8501:8501"
+    depends_on:
+      - web
+    environment:
+      - API_URL=http://172.20.0.2:5001
+    networks:
+      app-network:
+        ipv4_address: 172.20.0.4
+
+networks:
+  app-network:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data:

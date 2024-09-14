@@ -96,22 +96,7 @@ def get_ingested_files():
         files = session.query(IngestedFile).all()
     return jsonify([{"id": f.id, "name": f.name, "context": f.context} for f in files])
 
-@app.route('/query', methods=['POST'])
-def query():
-    data = request.json
-    question = data.get('question')
-    context = data.get('context')
-    stream = data.get('stream', False)
-
-    if not question or not context:
-        return jsonify({"error": "Missing question or context"}), 400
-
-    # Create a retriever
-    retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 5, "filter": {"context": context}}
-    )
-
+def create_qa_chain(stream=False):
     # Create a prompt template
     template = """You are an AI assistant. Use the following pieces of context to answer the question at the end.
     If you don't know the answer, just say that you don't know, don't try to make up an answer.
@@ -142,6 +127,12 @@ def query():
         template=template,
     )
 
+    # Create a retriever
+    retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 5}
+    )
+
     # Create a RetrievalQA chain
     if stream:
         callbacks = [StreamingStdOutCallbackHandler()]
@@ -156,11 +147,24 @@ def query():
         chain_type_kwargs={"prompt": prompt}
     )
 
+    return qa_chain
+@app.route('/query', methods=['POST'])
+def query():
+    data = request.json
+    question = data.get('question')
+    context = data.get('context')
+    stream = data.get('stream', False)
+
+    if not question or not context:
+        return jsonify({"error": "Missing question or context"}), 400
+
+    qa_chain = create_qa_chain(stream=stream)
+
     if stream:
         return Response(stream_with_context(streaming_query(qa_chain, question)), content_type='application/json')
     else:
         # Get the answer
-        result = qa_chain({"query": question})
+        result = qa_chain.invoke({"query": question})
         return jsonify({
             "question": question,
             "answer": result["result"],
@@ -183,16 +187,20 @@ def streaming_query(qa_chain, question):
     # Use combine_documents_chain instead of llm
     qa_chain.combine_documents_chain.llm_chain.llm.callbacks = [stream_handler]
 
-    result = qa_chain({"query": question})
+    result = qa_chain.invoke({"query": question})
 
-    # Yield any remaining tokens
-    if stream_handler.tokens:
-        yield json.dumps({"token": "".join(stream_handler.tokens)}) + "\n"
+    # Use a generator function to yield tokens
+    def token_generator():
+        yield from stream_handler.on_llm_new_token("", **{})
+        # Yield any remaining tokens
+        if stream_handler.tokens:
+            yield json.dumps({"token": "".join(stream_handler.tokens)}) + "\n"
+        # Yield the sources
+        yield json.dumps({
+            "sources": [doc.page_content for doc in result["source_documents"]]
+        }) + "\n"
 
-    # Yield the sources
-    yield json.dumps({
-        "sources": [doc.page_content for doc in result["source_documents"]]
-    }) + "\n"
+    return token_generator()
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001)

@@ -39,6 +39,7 @@ services:
       - web
     environment:
       - API_URL=http://172.20.0.2:5001
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     networks:
       app-network:
         ipv4_address: 172.20.0.4

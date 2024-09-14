@@ -128,7 +128,7 @@ def create_qa_chain(stream=False):
 
     Is there anything else you would like to know about this topic?
     
-    Please, provide the answer in the same Human language.
+    Please, provide the answer in PT-BR.
     """
 
     prompt = PromptTemplate(

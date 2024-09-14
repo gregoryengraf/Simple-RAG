@@ -3,13 +3,45 @@ import streamlit as st
 import requests
 import json
 import os
+import base64
+from openai import OpenAI
 
 API_URL = os.environ.get("API_URL", "http://172.20.0.2:5001")
+
+# Get OpenAI API key from environment variable
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY not found in environment variables")
 
 st.set_page_config(page_title="RAG Query System", page_icon="🤖", layout="wide")
 
 # Add this for debugging
 st.write(f"API_URL: {API_URL}")
+
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Function to generate audio from text
+def text_to_speech(text):
+    response = client.audio.speech.create(
+        model="tts-1",
+        voice="alloy",
+        input=text
+    )
+
+    # Save the audio to a file
+    audio_file_path = "response_audio.mp3"
+    with open(audio_file_path, "wb") as audio_file:
+        audio_file.write(response.content)
+
+    return audio_file_path
+
+# Function to create an HTML audio player
+def get_audio_player(audio_file_path):
+    audio_file = open(audio_file_path, "rb")
+    audio_bytes = audio_file.read()
+    audio_base64 = base64.b64encode(audio_bytes).decode()
+    return f'<audio autoplay controls><source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3"></audio>'
 
 # Sidebar for navigation
 page = st.sidebar.selectbox("Choose a page", ["Query", "Ingest"])
@@ -53,14 +85,21 @@ if page == "Query":
                             elif "sources" in data:
                                 sources = data["sources"]
 
-                    # Display the full response and sources
-                    st.markdown("## Full Response")
-                    st.write(full_response)
+                    # Generate audio for the full response
+                    audio_file_path = text_to_speech(full_response)
 
-                    st.markdown("## Sources")
-                    for i, source in enumerate(sources, 1):
-                        st.write(f"Source {i}:")
-                        st.text(source)
+                    # Display audio player
+                    st.markdown("## Audio Response")
+                    st.markdown(get_audio_player(audio_file_path), unsafe_allow_html=True)
+
+                    # Display the full response and sources
+                    # st.markdown("## Full Response")
+                    # st.write(full_response)
+                    #
+                    # st.markdown("## Sources")
+                    # for i, source in enumerate(sources, 1):
+                    #     st.write(f"Source {i}:")
+                    #     st.text(source)
                 else:
                     st.error(f"Error: {response.status_code} - {response.text}")
         else:

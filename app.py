@@ -1,12 +1,14 @@
 import os
+from queue import Queue, Empty
+import concurrent.futures
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, Response, stream_with_context
 from langchain.text_splitter import CharacterTextSplitter
+from langchain.callbacks.base import BaseCallbackHandler
 from langchain_postgres import PGVector
 from langchain_openai import OpenAIEmbeddings, OpenAI
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 import json
 from sqlalchemy import create_engine, Column, Integer, String, text, select
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -96,6 +98,13 @@ def get_ingested_files():
         files = session.query(IngestedFile).all()
     return jsonify([{"id": f.id, "name": f.name, "context": f.context} for f in files])
 
+class StreamingHandler(BaseCallbackHandler):
+    def __init__(self):
+        self.queue = Queue()
+
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        self.queue.put(token)
+
 def create_qa_chain(stream=False):
     # Create a prompt template
     template = """You are an AI assistant. Use the following pieces of context to answer the question at the end.
@@ -135,7 +144,7 @@ def create_qa_chain(stream=False):
 
     # Create a RetrievalQA chain
     if stream:
-        callbacks = [StreamingStdOutCallbackHandler()]
+        callbacks = [StreamingHandler()]
     else:
         callbacks = []
 
@@ -147,7 +156,7 @@ def create_qa_chain(stream=False):
         chain_type_kwargs={"prompt": prompt}
     )
 
-    return qa_chain
+    return qa_chain, callbacks[0] if stream else None
 @app.route('/query', methods=['POST'])
 def query():
     data = request.json
@@ -158,12 +167,11 @@ def query():
     if not question or not context:
         return jsonify({"error": "Missing question or context"}), 400
 
-    qa_chain = create_qa_chain(stream=stream)
+    qa_chain, stream_handler = create_qa_chain(stream=stream)
 
     if stream:
-        return Response(stream_with_context(streaming_query(qa_chain, question)), content_type='application/json')
+        return Response(stream_with_context(streaming_query(qa_chain, question, stream_handler)), content_type='application/json')
     else:
-        # Get the answer
         result = qa_chain.invoke({"query": question})
         return jsonify({
             "question": question,
@@ -171,36 +179,39 @@ def query():
             "sources": [doc.page_content for doc in result["source_documents"]]
         }), 200
 
-def streaming_query(qa_chain, question):
-    class StreamHandler(StreamingStdOutCallbackHandler):
-        def __init__(self):
-            self.tokens = []
+def streaming_query(qa_chain, question, stream_handler):
+    def generate():
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(qa_chain.invoke, {"query": question})
 
-        def on_llm_new_token(self, token: str, **kwargs) -> None:
-            self.tokens.append(token)
-            if token.endswith(("\n", ".", "!", "?")):
-                yield json.dumps({"token": "".join(self.tokens)}) + "\n"
-                self.tokens = []
+            accumulated_tokens = []
+            while not future.done() or not stream_handler.queue.empty():
+                try:
+                    token = stream_handler.queue.get(timeout=0.1)  # 100ms timeout
+                    accumulated_tokens.append(token)
+                    if token.endswith(("\n", ".", "!", "?")):
+                        yield json.dumps({"token": "".join(accumulated_tokens)}) + "\n"
+                        accumulated_tokens = []
+                except Empty:
+                    continue
+                except Exception as e:
+                    yield json.dumps({"error": str(e)}) + "\n"
+                    break
 
-    stream_handler = StreamHandler()
+            if accumulated_tokens:
+                yield json.dumps({"token": "".join(accumulated_tokens)}) + "\n"
 
-    # Use combine_documents_chain instead of llm
-    qa_chain.combine_documents_chain.llm_chain.llm.callbacks = [stream_handler]
+            try:
+                result = future.result(timeout=30)  # 30 seconds timeout
+                yield json.dumps({
+                    "sources": [doc.page_content for doc in result["source_documents"]]
+                }) + "\n"
+            except concurrent.futures.TimeoutError:
+                yield json.dumps({"error": "Query timed out"}) + "\n"
+            except Exception as e:
+                yield json.dumps({"error": str(e)}) + "\n"
 
-    result = qa_chain.invoke({"query": question})
-
-    # Use a generator function to yield tokens
-    def token_generator():
-        yield from stream_handler.on_llm_new_token("", **{})
-        # Yield any remaining tokens
-        if stream_handler.tokens:
-            yield json.dumps({"token": "".join(stream_handler.tokens)}) + "\n"
-        # Yield the sources
-        yield json.dumps({
-            "sources": [doc.page_content for doc in result["source_documents"]]
-        }) + "\n"
-
-    return token_generator()
+    return generate()
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001)
